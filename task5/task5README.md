@@ -1,1 +1,107 @@
+一、任务完成概述
+我选择PennFudanPed 行人数据集，基于 PyTorch 框架对 Mask R-CNN（ResNet50-FPN 骨干网络）进行源码级定制化微调，完成了「行人目标检测 + 实例分割」的核心目标，未使用 YOLO、PaddleX 等高层黑盒工具
 
+指标项	结果
+最终验证集平均 IoU	0.9074
+训练收敛平均 Loss	0.1503
+模型参数量	43.92 M
+模型计算量	178.03 GFLOPs
+训练轮次	15 Epoch
+
+完成内容
+实现了数据集自动下载、自定义数据加载、同步数据增强、模型定制化构建、全流程训练验证、推理可视化全链路代码；
+完成了考核要求的「原图 + BBox 预测 + Mask 预测叠加可视化」，生成结果result.png；
+完整复现了实例分割任务的核心逻辑，清晰掌握了 Mask R-CNN 的双分支结构、数据处理要求、训练推理全流程。
+
+二、任务五必答问题
+1. 可视化结果说明
+本次任务最终生成的result.png，完整包含了考核要求的三类核心内容：
+原始输入的行人图片；
+模型预测的行人边界框 BBox，附带对应置信度标签；
+与每个行人实例一一对应的 Mask 掩码叠加效果，用不同颜色区分不同行人，完整覆盖目标轮廓。
+可视化结果验证了模型同时完成了目标检测与实例分割的核心任务，符合考核要求。
+2. 分割任务的数据处理 (Mask) 与分类任务 (Label) 的核心区别
+ 对比维度	分类任务（如 CIFAR-10）	本次实例分割任务
+标签粒度	图像级粗粒度，单张图片仅对应 1 个类别标量，仅标注图片主体类别	像素级细粒度，单张图片对应与原图同尺寸的多维掩码张量，每个像素都有类别标签，同时区分不同的目标实例
+标签维度	一维张量[batch_size]，仅需存储类别编号	四维张量[batch_size, num_instances, H, W]，需同时存储掩码、边界框、类别、面积等多维度标注信息
+预处理逻辑	仅需对图片做缩放、归一化等操作，标签无需额外同步处理	图片和标注必须做同步空间变换（翻转、缩放等），需单独计算每个实例的边界框、分离实例掩码，处理逻辑复杂度远高于分类任务
+损失函数适配	仅需适配交叉熵分类损失，输入维度简单统一	需同时适配分类损失、边界框回归损失、掩码分割损失，多分支损失需对齐不同维度的标签与预测值
+
+3. 数据处理过程中遇到的难点与解决方法
+难点 1：掩码标注的实例分离问题
+问题：PennFudanPed 数据集的掩码图中，不同行人用不同像素值标注，直接读取会丢失实例区分度，无法适配实例分割 “单目标单掩码” 的要求。排查思路：先通过np.unique查看掩码图的像素值，发现非 0 像素值的数量与图片中行人数量完全对应，确认每个像素值对应一个独立的行人实例。解决方法：通过np.unique获取所有非 0 实例 ID，通过广播操作为每个实例生成独立的二值掩码，确保掩码、边界框、类别标签一一对应，完全匹配 Mask R-CNN 的输入要求。
+难点 2：数据增强的标注同步问题
+问题：最开始使用 PyTorch 原生的RandomHorizontalFlip做数据增强，仅能翻转图片，无法同步翻转边界框和掩码，导致训练时标签与图片空间位置错位，训练 Loss 一直无法下降。排查思路：打印翻转前后的边界框坐标，发现翻转后坐标完全错位，查阅 PyTorch 官方文档确认原生变换仅支持单图片输入，无法同步处理检测 / 分割标注。解决方法：自定义Compose、RandomHorizontalFlip变换类，确保所有空间变换同时作用于图片、边界框、掩码，翻转时同步根据图片宽度调整边界框坐标，保证标签与图片的空间一致性，修复后训练 Loss 正常收敛。
+难点 3：不同尺寸图片的批量加载问题
+问题：数据集中图片宽高比不统一，无法直接拼接为固定尺寸的 batch 张量，使用默认 DataLoader 直接报错。排查思路：定位报错在 DataLoader 的批量拼接环节，发现 Mask R-CNN 原生支持不同尺寸的图片输入，无需强制缩放为统一尺寸。解决方法：自定义collate_fn函数，将 batch 数据以元组形式返回，而非强制拼接为固定尺寸张量，完美适配 Mask R-CNN 对多尺寸图片的输入要求。
+
+三、Bug 复盘日志（考核强制要求）
+Bug1：缩进错误 / 语法错误（IndentationError）
+报错 Traceback：
+plaintext
+  File "task5.py", line 81
+    import torchvision
+    ^
+IndentationError: unexpected indent
+报错原因：将import torchvision语句写在了get_transform函数的return语句之后，且存在错误的缩进，Python 解析器判定为语法错误，程序完全无法运行。排查思路：先看报错行号，定位到第 81 行的 import 语句，回忆 Python 的语法规则：函数内return后代码永远不会执行，且 import 语句的缩进层级错误，不符合 Python 的缩进规范。解决方法：将所有 import 语句统一移到文件最顶部，删除函数内return后的所有无效导入语句，修复后语法错误消失，程序可正常解析。AI 与搜索引擎使用：搜索引擎关键词「Python IndentationError unexpected indent」，AI 给出了缩进错误的核心原因，确认了 Python 导入语句的规范写法，回答正确。
+Bug2：模块未找到错误（ModuleNotFoundError）
+报错 Traceback：
+plaintext
+Traceback (most recent call last):
+  File "task5.py", line 201, in <module>
+    from thop import profile
+ModuleNotFoundError: No module named 'thop'
+报错原因：Anaconda 的 pytorch3.9 虚拟环境中，没有安装thop第三方库，Python 无法找到对应模块，导入失败。排查思路：先通过conda list查看环境中已安装的包，确认没有thop，定位到是依赖缺失问题。解决方法：在激活的虚拟环境中执行pip install thop，同时在代码中加入自动安装逻辑，避免后续再次出现该问题。AI 与搜索引擎使用：直接询问 AI 该报错的解决方法，AI 给出了安装命令，回答正确，同时补充了自动安装的代码逻辑。
+Bug3：变量名与模块名冲突错误（AttributeError）
+报错 Traceback：
+plaintext
+Traceback (most recent call last):
+  File "task5.py", line 209, in <module>
+    lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+AttributeError: 'StepLR' object has no attribute 'StepLR'
+报错原因：先从torch.optim导入了名为lr_scheduler的模块，又用同名变量lr_scheduler接收了StepLR的实例，变量名覆盖了模块名，后续调用时 Python 无法找到对应的模块属性。排查思路：打印lr_scheduler的类型，发现第一次赋值后，它从模块变成了StepLR对象，定位到是变量名覆盖的问题。解决方法：将变量名改为lr_scheduler_obj，避免与导入的模块名冲突，修复后报错消失。AI 与搜索引擎使用：搜索引擎关键词「Python AttributeError object has no attribute StepLR」，AI 指出了变量名冲突的核心问题，回答正确。
+Bug4：重复主入口导致的文件不存在错误（FileNotFoundError）
+报错 Traceback：
+plaintext
+Traceback (most recent call last):
+  File "task5.py", line 294, in <module>
+    model.load_state_dict(torch.load(model_path, map_location=device))
+FileNotFoundError: [Errno 2] No such file or directory: 'mask_rcnn_pedestrian_final.pth'
+报错原因：代码中写了两个if __name__ == "__main__"主入口，主脚本运行时两个入口都会执行，第一个入口刚启动训练，还没生成最终模型文件，第二个入口就尝试加载该文件，触发文件不存在错误。排查思路：在两个主入口都加了打印语句，发现两个入口同时执行，确认了重复入口的问题。解决方法：删除重复的主入口，用main函数 +mode参数统一控制训练 / 推理模式，避免重复执行冲突。AI 与搜索引擎使用：AI 解释了if __name__ == "__main__"的执行逻辑，指出了重复入口的问题，回答正确。
+Bug5：名称未定义错误（NameError）
+报错 Traceback：
+plaintext
+Traceback (most recent call last):
+  File "task5.py", line 150, in <module>
+    model = torchvision.models.detection.maskrcnn_resnet50_fpn(...)
+NameError: name 'torchvision' is not defined
+报错原因：torchvision的导入语句写在了get_transform函数的return之后，永远不会执行，全局命名空间中没有torchvision这个名称，调用时触发未定义错误。排查思路：查看代码顶部的导入块，发现没有torchvision的导入，定位到导入语句的位置错误。解决方法：将import torchvision统一移到文件最顶部的导入块，确保全局可用，修复后报错消失。AI 与搜索引擎使用：直接查看报错行号，结合 Python「先导入后使用」的规则，自行定位并解决了问题，未依赖 AI。
+Bug6：推理时权重加载错误（RuntimeError）
+报错 Traceback：
+plaintext
+RuntimeError: Error(s) in loading state_dict for MaskRCNN:
+    Unexpected key(s) in state_dict: "total_ops", "total_params", "backbone.body.total_ops", ...
+报错原因：thop库的profile函数在计算模型参数量和 FLOPs 时，会给模型的每一层动态添加total_ops、total_params属性，训练保存模型时，这些属性被误写入权重文件，推理时构建的纯净 Mask R-CNN 模型没有这些 key，导致权重加载匹配失败。排查思路：查看报错的冗余 key，发现全部是thop相关的计算量 / 参数量字段，定位到是thop库的副作用污染了模型权重。解决方法：
+临时解决：在load_state_dict时添加strict=False参数，忽略不匹配的冗余 key；
+根治解决：计算完参数量后，遍历模型所有层，删除thop添加的total_ops、total_params属性，从根源避免权重污染。
+AI 与搜索引擎使用：搜索引擎关键词「torch load_state_dict unexpected key total_ops」，AI 一开始没有定位到thop的问题，只给出了strict=False的临时方案，后续结合搜索结果，自行找到了根治的方法，AI 在该问题的深层原因解释上失效。
+四、AI 使用说明（考核强制要求）
+四、AI 使用说明（考核强制要求）
+1. AI 最有用的环节
+基础代码框架搭建：AI 能快速给出 Mask R-CNN 的基础训练 / 推理代码模板，帮我快速搭建了任务的整体框架，节省了从零开始写样板代码的时间，让我能把精力放在核心逻辑的调试和理解上。
+基础语法与报错快速定位：对于缩进错误、模块未找到、变量名冲突这类基础语法报错，AI 能快速指出错误原因和解决方法，比自己逐行查代码效率高很多。
+核心概念解释：对于实例分割的核心概念、Mask R-CNN 的双分支结构、数据处理的核心要求，AI 能给出通俗易懂的解释，帮我快速理解任务的底层逻辑，降低了入门门槛。
+2. AI 失效的环节
+实例分割的细节问题处理：对于数据增强的标注同步问题，AI 一开始给出的原生transforms方案完全无法适配实例分割的标注同步要求，导致标签错位，训练效果异常，AI 没有考虑到实例分割任务的特殊数据处理要求。
+深层报错的根因定位：对于thop库污染模型权重的报错，AI 只给出了strict=False的临时解决方案，没有找到问题的根源，也没有给出根治的方法，最终是我自己结合搜索结果和代码调试，找到了删除冗余属性的根治方案。
+API 过期与版本适配问题：AI 给出的部分 PyTorch 代码是旧版本的 API，和我安装的 PyTorch 2.0 版本不兼容，运行时直接报错，需要自己查阅官方文档修正 API。
+3. 核心追问：如果没有 AI，你觉得自己能独立完成哪部分？
+如果没有 AI，我可以独立完成以下内容：
+环境配置与基础代码运行：可以通过 PyTorch 官方文档、GitHub 开源项目，完成环境配置、数据集加载、基础训练循环的编写，这部分是深度学习的基础内容，官方文档有完整的示例和教程。
+基础语法报错排查：对于缩进错误、模块缺失、变量名冲突这类基础报错，可以通过搜索引擎、Python 官方文档自行定位并解决。
+推理可视化与结果整理：可以通过 OpenCV、Matplotlib 的官方文档，完成边界框、掩码的绘制和可视化，生成符合要求的结果图。
+学习笔记与 Bug 复盘：可以独立完成整个任务的学习笔记、Bug 复盘、原理思考，这部分是基于自己的真实操作和思考，完全不依赖 AI。
+如果没有 AI，我需要花费更多的时间查阅官方文档和开源项目，整体进度会变慢，但依然可以完成任务五的核心内容，只是代码框架的搭建速度会慢很多。
+六、总结
+本次任务五的完成过程，踩了很多从语法、逻辑到工程细节的坑，也让我完整掌握了实例分割任务的全流程。正如考核前言所说，本次任务的核心不是跑出完美的结果，而是在踩坑、排查、解决问题的过程中，锻炼了自己的自学能力、抗压能力和问题排查能力。
+我也深刻认识到，AI 工具只是辅助，它能帮我们快速搭建框架、解决基础问题，但对于任务的细节、深层的原理、特殊场景的问题，还是需要自己去理解、调试和思考，这也是实验室考核最看重的核心能力。
