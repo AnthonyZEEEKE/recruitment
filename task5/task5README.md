@@ -75,13 +75,37 @@
 
 4. 数据处理过程中遇到的难点与解决方法
 难点 1：掩码标注的实例分离问题
-问题：PennFudanPed 数据集的掩码图中，不同行人用不同像素值标注，直接读取会丢失实例区分度，无法适配实例分割 “单目标单掩码” 的要求。排查思路：先通过np.unique查看掩码图的像素值，发现非 0 像素值的数量与图片中行人数量完全对应，确认每个像素值对应一个独立的行人实例。解决方法：通过np.unique获取所有非 0 实例 ID，通过广播操作为每个实例生成独立的二值掩码，确保掩码、边界框、类别标签一一对应，完全匹配 Mask R-CNN 的输入要求。
+问题
+PennFudanPed 的掩码图是 “一张图里不同行人用不同数字标”—— 比如行人 A 是 1，行人 B 是 2，背景是 0。但直接读给模型，它会把所有行人当成 “一个整体”，不知道 “这是两个不同的人”。类比：一张涂色卡上，猫用红色、狗用蓝色，但直接给模型看，它只知道 “有颜色的是动物”，分不清 “红色是猫、蓝色是狗”。
+排查思路
+数了一下掩码图里除了 0 之外的数字，发现数字的数量刚好等于图里的行人数量—— 比如图里有 2 个行人，除了 0 就只有 1 和 2，确认 “每个数字对应一个独立的人”。
+解决方法
+把这张 “混合涂色卡” 拆成好几张单独的 “黑白卡”：
+第一张卡：只有行人 1 是白色（1），其他全是黑色（0）；
+第二张卡：只有行人 2 是白色，其他全是黑色；
+再把这些卡和对应的 “行人框”“类别标签” 绑在一起，模型就知道 “这是两个不同的行人” 了。
 难点 2：数据增强的标注同步问题
-问题：最开始使用 PyTorch 原生的RandomHorizontalFlip做数据增强，仅能翻转图片，无法同步翻转边界框和掩码，导致训练时标签与图片空间位置错位，训练 Loss 一直无法下降。排查思路：打印翻转前后的边界框坐标，发现翻转后坐标完全错位，查阅 PyTorch 官方文档确认原生变换仅支持单图片输入，无法同步处理检测 / 分割标注。解决方法：自定义Compose、RandomHorizontalFlip变换类，确保所有空间变换同时作用于图片、边界框、掩码，翻转时同步根据图片宽度调整边界框坐标，保证标签与图片的空间一致性，修复后训练 Loss 正常收敛。
+问题
+一开始用ai写的程序，只翻了图片，没翻框和掩码—— 比如图片里行人在左边，翻到右边了，但框还在左边、掩码也还在左边，模型学的就是 “框里没东西、掩码也不对”，所以错误率（Loss）一直降不下来。类比：你把课本左右翻过来读，但笔记还是写在原来的位置，完全对不上，学不好。
+排查思路
+打印了翻转前后的框坐标，发现翻完之后位置全错了；原来发现只翻图片，不管框和掩码。
+解决方法
+翻图片的同时，把框的坐标也反过来（比如原来框的左边界是 100，图片宽是 500，翻完之后左边界就是 500-100 - 框宽）；
+把掩码也左右翻过来；
+保证 “图片动，框和掩码也跟着动”，之后错误率就正常降下来了。
 难点 3：不同尺寸图片的批量加载问题
-问题：数据集中图片宽高比不统一，无法直接拼接为固定尺寸的 batch 张量，使用默认 DataLoader 直接报错。排查思路：定位报错在 DataLoader 的批量拼接环节，发现 Mask R-CNN 原生支持不同尺寸的图片输入，无需强制缩放为统一尺寸。解决方法：自定义collate_fn函数，将 batch 数据以元组形式返回，而非强制拼接为固定尺寸张量，完美适配 Mask R-CNN 对多尺寸图片的输入要求。
+问题
+数据集中的图片有的宽有的窄、有的高有的矮，没法直接拼成 “一叠一样大的照片”（batch 张量），用默认的加载工具直接报错。类比：你想把 A4 纸、明信片、便签纸叠在一起装订，但大小不一样，订不起来。
+排查思路（简化版）
+发现报错是在 “拼照片” 的环节；查 Mask R-CNN 的资料才知道，它本来就支持不同大小的图片一起输入，不用强制改成一样大。
+解决方法
+写了一个 “打包方式”：
+不把图片拼成一样大的一叠，而是把每张图片、对应的框、掩码分别装在 “小袋子” 里；
+再把这些小袋子放在一个 “大袋子” 里给模型；
+模型就能一个个处理了，完美解决报错问题。
 
-三、Bug 复盘日志（考核强制要求）
+三、Bug 复盘日志
+
 Bug1：缩进错误 / 语法错误（IndentationError）
 报错 Traceback：
 plaintext
@@ -90,6 +114,7 @@ plaintext
     ^
 IndentationError: unexpected indent
 报错原因：将import torchvision语句写在了get_transform函数的return语句之后，且存在错误的缩进，Python 解析器判定为语法错误，程序完全无法运行。排查思路：先看报错行号，定位到第 81 行的 import 语句，回忆 Python 的语法规则：函数内return后代码永远不会执行，且 import 语句的缩进层级错误，不符合 Python 的缩进规范。解决方法：将所有 import 语句统一移到文件最顶部，删除函数内return后的所有无效导入语句，修复后语法错误消失，程序可正常解析。AI 与搜索引擎使用：搜索引擎关键词「Python IndentationError unexpected indent」，AI 给出了缩进错误的核心原因，确认了 Python 导入语句的规范写法，回答正确。
+
 Bug2：模块未找到错误（ModuleNotFoundError）
 报错 Traceback：
 plaintext
@@ -98,6 +123,7 @@ Traceback (most recent call last):
     from thop import profile
 ModuleNotFoundError: No module named 'thop'
 报错原因：Anaconda 的 pytorch3.9 虚拟环境中，没有安装thop第三方库，Python 无法找到对应模块，导入失败。排查思路：先通过conda list查看环境中已安装的包，确认没有thop，定位到是依赖缺失问题。解决方法：在激活的虚拟环境中执行pip install thop，同时在代码中加入自动安装逻辑，避免后续再次出现该问题。AI 与搜索引擎使用：直接询问 AI 该报错的解决方法，AI 给出了安装命令，回答正确，同时补充了自动安装的代码逻辑。
+
 Bug3：变量名与模块名冲突错误（AttributeError）
 报错 Traceback：
 plaintext
@@ -106,6 +132,10 @@ Traceback (most recent call last):
     lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 AttributeError: 'StepLR' object has no attribute 'StepLR'
 报错原因：先从torch.optim导入了名为lr_scheduler的模块，又用同名变量lr_scheduler接收了StepLR的实例，变量名覆盖了模块名，后续调用时 Python 无法找到对应的模块属性。排查思路：打印lr_scheduler的类型，发现第一次赋值后，它从模块变成了StepLR对象，定位到是变量名覆盖的问题。解决方法：将变量名改为lr_scheduler_obj，避免与导入的模块名冲突，修复后报错消失。AI 与搜索引擎使用：搜索引擎关键词「Python AttributeError object has no attribute StepLR」，AI 指出了变量名冲突的核心问题，回答正确。
+(把 torch.optim.lr_scheduler 比作一个 工具箱（这是一个模块）；
+把工具箱里的 StepLR 比作一把锤子（这是一个 类，可以用来造具体的锤子）
+先给 “工具箱” 起了个名叫 lr_scheduler，然后又用同一个名字 lr_scheduler 去装 “具体的锤子”——原来的 “工具箱” 被 “锤子” 覆盖了！等你再想从 “lr_scheduler” 里拿东西时，它已经是锤子了，里面当然没有 “StepLR”（锤子）可以拿，所以报错。)
+
 Bug4：重复主入口导致的文件不存在错误（FileNotFoundError）
 报错 Traceback：
 plaintext
@@ -114,6 +144,7 @@ Traceback (most recent call last):
     model.load_state_dict(torch.load(model_path, map_location=device))
 FileNotFoundError: [Errno 2] No such file or directory: 'mask_rcnn_pedestrian_final.pth'
 报错原因：代码中写了两个if __name__ == "__main__"主入口，主脚本运行时两个入口都会执行，第一个入口刚启动训练，还没生成最终模型文件，第二个入口就尝试加载该文件，触发文件不存在错误。排查思路：在两个主入口都加了打印语句，发现两个入口同时执行，确认了重复入口的问题。解决方法：删除重复的主入口，用main函数 +mode参数统一控制训练 / 推理模式，避免重复执行冲突。AI 与搜索引擎使用：AI 解释了if __name__ == "__main__"的执行逻辑，指出了重复入口的问题，回答正确。
+
 Bug5：名称未定义错误（NameError）
 报错 Traceback：
 plaintext
@@ -122,6 +153,7 @@ Traceback (most recent call last):
     model = torchvision.models.detection.maskrcnn_resnet50_fpn(...)
 NameError: name 'torchvision' is not defined
 报错原因：torchvision的导入语句写在了get_transform函数的return之后，永远不会执行，全局命名空间中没有torchvision这个名称，调用时触发未定义错误。排查思路：查看代码顶部的导入块，发现没有torchvision的导入，定位到导入语句的位置错误。解决方法：将import torchvision统一移到文件最顶部的导入块，确保全局可用，修复后报错消失。AI 与搜索引擎使用：直接查看报错行号，结合 Python「先导入后使用」的规则，自行定位并解决了问题，未依赖 AI。
+
 Bug6：推理时权重加载错误（RuntimeError）
 报错 Traceback：
 plaintext
@@ -131,6 +163,12 @@ RuntimeError: Error(s) in loading state_dict for MaskRCNN:
 临时解决：在load_state_dict时添加strict=False参数，忽略不匹配的冗余 key；
 根治解决：计算完参数量后，遍历模型所有层，删除thop添加的total_ops、total_params属性，从根源避免权重污染。
 AI 与搜索引擎使用：搜索引擎关键词「torch load_state_dict unexpected key total_ops」，AI 一开始没有定位到thop的问题，只给出了strict=False的临时方案，后续结合搜索结果，自行找到了根治的方法，AI 在该问题的深层原因解释上失效。
+(thop 库在计算模型参数量 / FLOPs 时，会给模型的每一层动态添加额外的属性（total_ops、total_params），就像给零件贴临时标签；保存模型时，这些 “临时标签” 被误写进了权重文件；但推理时新建的模型是 “干净的”，没有这些标签，导致权重加载时 “零件名字对不上”，报错。)
+(1. 临时解决：告诉模型 “忽略不认识的零件”
+在加载权重时加个 strict=False 参数，意思是：“零件清单里有我不认识的名字没关系，跳过它们，只装我认识的零件就行。”)
+(2. 根治解决：算完性能后，把 “临时标签” 撕掉
+在用 thop 算完参数量 / FLOPs 之后，手动遍历模型的所有层，把 thop 添加的 total_ops、total_params 属性删掉，从根源上避免污染权重。)
+
 
 四、AI 使用说明
 
